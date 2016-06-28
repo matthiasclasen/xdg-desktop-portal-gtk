@@ -44,7 +44,8 @@ EXTRA_DIST = xdg-desktop-portal-gtk.gresource.xml
 
 xdg_desktop_portal_gtk_SOURCES = \
 	xdg-desktop-portal-gtk.c	\
-	xdg-desktop-portal-gtk.h	\
+	request.h			\
+	request.c			\
 	filechooser.h			\
 	filechooser.c			\
 	appchooser.h			\

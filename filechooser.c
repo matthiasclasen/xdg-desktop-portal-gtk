@@ -22,11 +22,10 @@
 #endif
 
 #include "filechooser.h"
-#include "xdg-desktop-portal-gtk.h"
+#include "request.h"
 
 typedef struct {
-  DialogHandle base;
-
+  Request *request;
   GtkWidget *dialog;
   GtkFileChooserAction action;
   gboolean multiple;
@@ -39,39 +38,12 @@ typedef struct {
   GHashTable *choices;
 } FileDialogHandle;
 
-static FileDialogHandle *
-dialog_handle_new (const char *app_id,
-                   const char *sender,
-                   GtkWidget *dialog,
-                   GDBusInterfaceSkeleton *skeleton)
-{
-  FileDialogHandle *handle = g_new0 (FileDialogHandle, 1);
-
-  handle->base.app_id = g_strdup (app_id);
-  handle->base.sender = g_strdup (sender);
-  handle->base.skeleton = g_object_ref (skeleton);
-
-  handle->dialog = g_object_ref (dialog);
-  handle->allow_write = TRUE;
-  handle->choices = g_hash_table_new (g_str_hash, g_str_equal);
-
-  dialog_handle_register (&handle->base);
-
-  /* TODO: Track lifetime of sender and close handle */
-
-  return handle;
-}
-
 static void
-file_dialog_handle_free (FileDialogHandle *handle)
+file_dialog_handle_free (gpointer data)
 {
-  dialog_handle_unregister (&handle->base);
-  g_free (handle->base.id);
-  g_free (handle->base.app_id);
-  g_free (handle->base.sender);
-  g_object_unref (handle->base.skeleton);
-  g_object_unref (handle->dialog);
+  FileDialogHandle *handle = data;
 
+  g_object_unref (handle->dialog);
   g_slist_free_full (handle->uris, g_free);
   g_hash_table_unref (handle->choices);
 
@@ -83,18 +55,6 @@ file_dialog_handle_close (FileDialogHandle *handle)
 {
   gtk_widget_destroy (handle->dialog);
   file_dialog_handle_free (handle);
-}
-
-static void
-dialog_handler_emit_response (FileDialogHandle *handle,
-                              const char *interface,
-                              const char *signal,
-                              GVariant *arguments)
-{
-  g_dbus_connection_emit_signal (g_dbus_interface_skeleton_get_connection (handle->base.skeleton),
-                                 "org.freedesktop.portal.Desktop",
-                                 "/org/freedesktop/portal/desktop",
-                                 interface, signal, arguments, NULL);
 }
 
 static void
@@ -117,59 +77,27 @@ add_choices (FileDialogHandle *handle,
 static void
 send_response (FileDialogHandle *handle)
 {
+  GVariantBuilder uri_builder;
   GVariantBuilder opt_builder;
-  GVariant *options;
+  GSList *l;
 
   g_variant_builder_init (&opt_builder, G_VARIANT_TYPE_VARDICT);
+
+  g_variant_builder_init (&uri_builder, G_VARIANT_TYPE_STRING_ARRAY);
+  for (l = handle->uris; l; l = l->next)
+    g_variant_builder_add (&uri_builder, "s", l->data);
+
+  g_variant_builder_add (&opt_builder, "{sv}", "uris", g_variant_builder_end (&uri_builder));
   g_variant_builder_add (&opt_builder, "{sv}", "writable", g_variant_new_variant (g_variant_new_boolean (handle->allow_write)));
 
   add_choices (handle, &opt_builder);
 
-  options = g_variant_builder_end (&opt_builder);
-
-  if (handle->action == GTK_FILE_CHOOSER_ACTION_SAVE ||
-      (handle->action == GTK_FILE_CHOOSER_ACTION_OPEN && !handle->multiple))
+  if (handle->request->exported)
     {
-      const char *signal_name;
-
-      if (handle->action == GTK_FILE_CHOOSER_ACTION_SAVE)
-        signal_name = "SaveFileResponse";
-      else
-        signal_name = "OpenFileResponse";
-
-      dialog_handler_emit_response (handle,
-                                    "org.freedesktop.impl.portal.FileChooser",
-                                    signal_name,
-                                    g_variant_new ("(sous@a{sv})",
-                                                   handle->base.sender,
-                                                   handle->base.id,
-                                                   handle->response,
-                                                   handle->uris ? (char *)handle->uris->data : "",
-                                                   options));
-    }
-  else
-    {
-      g_auto(GStrv) uris = NULL;
-      GSList *l;
-      gint i;
-
-      uris = g_new (char *, g_slist_length (handle->uris) + 1);
-      for (l = handle->uris, i = 0; l; l = l->next)
-        uris[i++] = l->data;
-      uris[i] = NULL;
-
-      g_slist_free (handle->uris);
-      handle->uris = NULL;
-
-      dialog_handler_emit_response (handle,
-                                    "org.freedesktop.impl.portal.FileChooser",
-                                    "OpenFilesResponse",
-                                    g_variant_new ("(sou^as@a{sv})",
-                                                   handle->base.sender,
-                                                   handle->base.id,
-                                                   handle->response,
-                                                   uris,
-                                                   options));
+      xdp_request_emit_response (XDP_REQUEST (handle->request),
+                                 handle->response,
+                                 g_variant_builder_end (&opt_builder));
+      request_unexport (handle->request);
     }
 
   file_dialog_handle_close (handle);
@@ -210,9 +138,9 @@ gtk_file_filter_from_gvariant (GVariant *variant)
 }
 
 static void
-handle_file_chooser_open_response (GtkWidget *widget,
-                                   int response,
-                                   gpointer user_data)
+file_chooser_response (GtkWidget *widget,
+                       int response,
+                       gpointer user_data)
 {
   FileDialogHandle *handle = user_data;
 
@@ -332,14 +260,24 @@ deserialize_choice (GVariant *choice,
 }
 
 static gboolean
-handle_file_chooser_open (XdpFileChooser *object,
-                          GDBusMethodInvocation *invocation,
-                          const gchar *arg_sender,
-                          const gchar *arg_app_id,
-                          const gchar *arg_parent_window,
-                          const gchar *arg_title,
-                          GVariant *arg_options)
+handle_close (XdpRequest *object,
+              GDBusMethodInvocation *invocation,
+              FileDialogHandle *handle)
 {
+  file_dialog_handle_close (handle);
+  return FALSE;
+}
+
+static gboolean
+handle_open (XdpFileChooser *object,
+             GDBusMethodInvocation *invocation,
+             const char *arg_handle,
+             const char *arg_app_id,
+             const char *arg_parent_window,
+             const char *arg_title,
+             GVariant *arg_options)
+{
+  Request *request = request_from_invocation (invocation, arg_app_id, arg_handle);
   const gchar *method_name;
   GtkFileChooserAction action;
   gboolean multiple;
@@ -347,7 +285,6 @@ handle_file_chooser_open (XdpFileChooser *object,
   GdkWindow *foreign_parent = NULL;
   GtkWidget *fake_parent;
   FileDialogHandle *handle;
-  XdpFileChooser *chooser = XDP_FILE_CHOOSER (g_dbus_method_invocation_get_user_data (invocation));
   const char *cancel_label;
   const char *accept_label;
   GVariantIter *iter;
@@ -356,10 +293,6 @@ handle_file_chooser_open (XdpFileChooser *object,
   g_autoptr (GVariant) choices = NULL;
 
   method_name = g_dbus_method_invocation_get_method_name (invocation);
-
-  g_print ("%s, app_id: %s, object: %p, user_data: %p\n",
-           method_name, arg_app_id, object,
-           g_dbus_method_invocation_get_user_data (invocation));
 
   fake_parent = gtk_window_new (GTK_WINDOW_TOPLEVEL);
   g_object_ref_sink (fake_parent);
@@ -384,11 +317,16 @@ handle_file_chooser_open (XdpFileChooser *object,
   gtk_dialog_set_default_response (GTK_DIALOG (dialog), GTK_RESPONSE_OK);
   gtk_file_chooser_set_select_multiple (GTK_FILE_CHOOSER (dialog), multiple);
 
-  handle = dialog_handle_new (arg_app_id, arg_sender, dialog, G_DBUS_INTERFACE_SKELETON (chooser));
-
-  handle->dialog = dialog;
+  handle = g_new0 (FileDialogHandle, 1);
+  handle->request = request;
+  handle->dialog = g_object_ref (dialog);
   handle->action = action;
   handle->multiple = multiple;
+  handle->choices = g_hash_table_new (g_str_hash, g_str_equal);
+
+  g_signal_connect (request, "handle-close", G_CALLBACK (handle_close), handle);
+
+  g_signal_connect (dialog, "response", G_CALLBACK (file_chooser_response), handle);
 
   choices = g_variant_lookup_value (arg_options, "choices", G_VARIANT_TYPE ("a(ssa(ss)s)"));
   if (choices)
@@ -453,9 +391,6 @@ handle_file_chooser_open (XdpFileChooser *object,
 
   gtk_file_chooser_set_do_overwrite_confirmation (GTK_FILE_CHOOSER (dialog), TRUE);
 
-  g_signal_connect (G_OBJECT (dialog), "response",
-                    G_CALLBACK (handle_file_chooser_open_response), handle);
-
   if (action == GTK_FILE_CHOOSER_ACTION_OPEN)
     {
       GtkWidget *readonly;
@@ -476,36 +411,9 @@ handle_file_chooser_open (XdpFileChooser *object,
 
   gtk_widget_show (dialog);
 
-  xdp_file_chooser_complete_open_file (chooser,
-                                       invocation,
-                                       handle->base.id);
+  request_export (request, g_dbus_method_invocation_get_connection (invocation));
 
-  return TRUE;
-}
-
-static gboolean
-handle_file_chooser_close (XdpFileChooser *object,
-                           GDBusMethodInvocation *invocation,
-                           const gchar *arg_sender,
-                           const gchar *arg_app_id,
-                           const gchar *arg_handle)
-{
-  FileDialogHandle *handle;
-
-  handle = (FileDialogHandle *)dialog_handle_find (arg_sender, arg_app_id, arg_handle,
-                                                   XDP_TYPE_FILE_CHOOSER_SKELETON);
-
-  if (handle != NULL)
-    {
-      file_dialog_handle_close (handle);
-      xdp_file_chooser_complete_close (object, invocation);
-    }
-  else
-    {
-      g_dbus_method_invocation_return_dbus_error (invocation,
-                                                  "org.freedesktop.Flatpak.Error.NotFound",
-                                                  "No such handle");
-    }
+  xdp_file_chooser_complete_open_file (object, invocation);
 
   return TRUE;
 }
@@ -518,10 +426,9 @@ file_chooser_init (GDBusConnection *bus,
 
   helper = G_DBUS_INTERFACE_SKELETON (xdp_file_chooser_skeleton_new ());
 
-  g_signal_connect (helper, "handle-open-file", G_CALLBACK (handle_file_chooser_open), NULL);
-  g_signal_connect (helper, "handle-open-files", G_CALLBACK (handle_file_chooser_open), NULL);
-  g_signal_connect (helper, "handle-save-file", G_CALLBACK (handle_file_chooser_open), NULL);
-  g_signal_connect (helper, "handle-close", G_CALLBACK (handle_file_chooser_close), NULL);
+  g_signal_connect (helper, "handle-open-file", G_CALLBACK (handle_open), NULL);
+  g_signal_connect (helper, "handle-open-files", G_CALLBACK (handle_open), NULL);
+  g_signal_connect (helper, "handle-save-file", G_CALLBACK (handle_open), NULL);
 
   if (!g_dbus_interface_skeleton_export (helper,
                                          bus,
