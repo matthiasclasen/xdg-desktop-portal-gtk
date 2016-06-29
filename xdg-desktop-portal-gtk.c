@@ -21,7 +21,7 @@
 #include <gdk/gdkx.h>
 #endif
 
-#include "xdg-desktop-portal-gtk.h"
+#include "request.h"
 #include "filechooser.h"
 #include "appchooser.h"
 #include "print.h"
