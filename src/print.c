@@ -40,6 +40,8 @@
 #include "request.h"
 #include "utils.h"
 
+#include "gtkbackports.h"
+
 typedef struct {
   char *app_id;
   GtkPageSetup *page_setup;
