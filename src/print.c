@@ -459,8 +459,8 @@ handle_print (XdpImplPrint *object,
   else
     g_warning ("Unhandled parent window type %s\n", arg_parent_window);
 
-  settings = gtk_print_settings_from_gvariant (arg_settings);
-  page_setup = gtk_page_setup_from_gvariant (arg_page_setup);
+  settings = gtk_print_settings_new_from_gvariant (arg_settings);
+  page_setup = gtk_page_setup_new_from_gvariant (arg_page_setup);
 
   dialog = gtk_print_unix_dialog_new (arg_title, NULL);
   gtk_print_unix_dialog_set_manual_capabilities (GTK_PRINT_UNIX_DIALOG (dialog), 0);
