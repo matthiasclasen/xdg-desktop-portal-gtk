@@ -235,9 +235,10 @@ color_picked (GObject *object,
       return;
     }
 
-  if (!g_variant_lookup (result, "red", "d", &handle->red) ||
-      !g_variant_lookup (result, "green", "d", &handle->green) ||
-      !g_variant_lookup (result, "blue", "d", &handle->blue))
+  if (!g_variant_lookup (result, "color", "(ddd)",
+                         &handle->red,
+                         &handle->green,
+                         &handle->blue))
     {
       g_warning ("PickColor didn't return a color");
       return;
