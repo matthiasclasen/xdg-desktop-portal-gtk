@@ -88,10 +88,10 @@ send_response (ScreenshotDialogHandle *handle)
                                                                            handle->green,
                                                                            handle->blue));
 
-      xdp_impl_screenshot_complete_screenshot_pixel (handle->impl,
-                                                     handle->invocation,
-                                                     handle->response,
-                                                     g_variant_builder_end (&opt_builder));
+      xdp_impl_screenshot_complete_pick_color (handle->impl,
+                                               handle->invocation,
+                                               handle->response,
+                                               g_variant_builder_end (&opt_builder));
 
     }
 
@@ -221,56 +221,27 @@ handle_screenshot (XdpImplScreenshot *object,
 }
 
 static void
-area_selected (GObject *object,
-               GAsyncResult *res,
-               gpointer data)
+color_picked (GObject *object,
+              GAsyncResult *res,
+              gpointer data)
 {
   ScreenshotDialogHandle *handle = data;
   g_autoptr(GError) error = NULL;
-  int x, y, w, h;
-  gboolean success;
-  g_autofree char *file = NULL;
-  g_autoptr(GdkPixbuf) pixbuf = NULL;
-  guchar *pixels;
+  g_autoptr(GVariant) result = NULL;
   
-  if (!org_gnome_shell_screenshot_call_select_area_finish (shell, &x, &y, &w, &h, res, &error))
+  if (!org_gnome_shell_screenshot_call_pick_color_finish (shell, &result, res, &error))
     {
-      g_warning ("SelectArea failed: %s", error->message);
+      g_warning ("PickColor failed: %s", error->message);
       return;
     }
 
-  if (!org_gnome_shell_screenshot_call_screenshot_area_sync (shell,
-                                                             x, y, 1, 1, FALSE, "color",
-                                                             &success, &file, NULL, &error))
+  if (!g_variant_lookup (result, "red", "d", &handle->red) ||
+      !g_variant_lookup (result, "green", "d", &handle->green) ||
+      !g_variant_lookup (result, "blue", "d", &handle->blue))
     {
-      g_warning ("ScreenshotArea failed: %s", error->message);
+      g_warning ("PickColor didn't return a color");
       return;
     }
-  
-  if (!success)
-    {
-      g_warning ("ScreenshotArea failed");
-      return;
-    }
-
-    pixbuf = gdk_pixbuf_new_from_file (file, &error);
-  if (!pixbuf)
-    {
-      g_warning ("Failed to read screenshot: %s", error->message);
-      return;
-    }
-
-  if (gdk_pixbuf_get_width (pixbuf) != 1 ||
-      gdk_pixbuf_get_height (pixbuf) != 1)
-    {
-      g_warning ("Unexpected screenshot size");
-      return;
-    }
-
-  pixels = gdk_pixbuf_get_pixels (pixbuf);
-  handle->red = pixels[0] / 255.0;
-  handle->green = pixels[1] / 255.0;
-  handle->blue = pixels[2] / 255.0;
 
   handle->response = 0;
 
@@ -278,12 +249,12 @@ area_selected (GObject *object,
 }
 
 static gboolean
-handle_screenshot_pixel (XdpImplScreenshot *object,
-                         GDBusMethodInvocation *invocation,
-                         const char *arg_handle,
-                         const char *arg_app_id,
-                         const char *arg_parent_window,
-                         GVariant *arg_options)
+handle_pick_color (XdpImplScreenshot *object,
+                   GDBusMethodInvocation *invocation,
+                   const char *arg_handle,
+                   const char *arg_app_id,
+                   const char *arg_parent_window,
+                   GVariant *arg_options)
 {
   g_autoptr(Request) request = NULL;
   const char *sender;
@@ -306,7 +277,7 @@ handle_screenshot_pixel (XdpImplScreenshot *object,
 
   request_export (request, g_dbus_method_invocation_get_connection (invocation));
 
-  org_gnome_shell_screenshot_call_select_area (shell, NULL, area_selected, handle);
+  org_gnome_shell_screenshot_call_pick_color (shell, NULL, color_picked, handle);
 
   return TRUE;
 }
@@ -320,7 +291,7 @@ screenshot_init (GDBusConnection *bus,
   helper = G_DBUS_INTERFACE_SKELETON (xdp_impl_screenshot_skeleton_new ());
 
   g_signal_connect (helper, "handle-screenshot", G_CALLBACK (handle_screenshot), NULL);
-  g_signal_connect (helper, "handle-screenshot-pixel", G_CALLBACK (handle_screenshot_pixel), NULL);
+  g_signal_connect (helper, "handle-pick-color", G_CALLBACK (handle_pick_color), NULL);
 
   if (!g_dbus_interface_skeleton_export (helper,
                                          bus,
